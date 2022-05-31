@@ -1,0 +1,322 @@
+3
+I need to include basic file-sending and file-receiving routines in my program, and it needs to be through the ZMODEM protocol. The problem is that I'm having trouble understanding the spec.
+
+For reference, here is the specification.
+
+The spec doesn't define the various constants, so here's a header file from Google.
+
+It seems to me like there are a lot of important things left undefined in that document:
+
+It constantly refers to ZDLE-encoding, but what is it? When exactly do I use it, and when don't I use it?
+After a ZFILE data frame, the file's metadata (filename, modify date, size, etc.) are transferred. This is followed by a ZCRCW block and then a block whose type is undefined according to the spec. The ZCRCW block allegedly contains a 16-bit CRC, but the spec doesn't define on what data the CRC is computed.
+It doesn't define the CRC polynomial it uses. I found out by chance that the CRC32 poly is the standard CRC32, but I've had no such luck with the CRC16 poly. Nevermind, I found it through trial and error. The CRC16 poly is 0x1021.
+I've looked around for reference code, but all I can find are unreadable, undocumented C files from the early 90s. I've also found this set of documents from the MSDN, but it's painfully vague and contradictory to tests that I've run: http://msdn.microsoft.com/en-us/library/ms817878.aspx (you may need to view that through Google's cache)
+
+To illustrate my difficulties, here is a simple example. I've created a plaintext file on the server containing "Hello world!", and it's called helloworld.txt.
+
+I initiate the transfer from the server with the following command:
+
+sx --zmodem helloworld.txt
+This prompts the server to send the following ZRQINIT frame:
+
+2A 2A 18 42 30 30 30 30 30 30 30 30 30 30 30 30   **.B000000000000
+30 30 0D 8A 11                                    00.Š.
+Three issues with this:
+
+Are the padding bytes (0x2A) arbitrary? Why are there two here, but in other instances there's only one, and sometimes none?
+The spec doesn't mention the [CR] [LF] [XON] at the end, but the MSDN article does. Why is it there?
+Why does the [LF] have bit 0x80 set?
+After this, the client needs to send a ZRINIT frame. I got this from the MSDN article:
+
+2A 2A 18 42 30 31 30 30 30 30 30 30 32 33 62 65   **.B0100000023be
+35 30 0D 8A                                       50.Š
+In addition to the [LF] 0x80 flag issue, I have two more issues:
+
+Why isn't [XON] included this time?
+Is the CRC calculated on the binary data or the ASCII hex data? If it's on the binary data I get 0x197C, and if it's on the ASCII hex data I get 0xF775; neither of these are what's actually in the frame (0xBE50). (Solved; it follows whichever mode you're using. If you're in BIN or BIN32 mode, it's the CRC of the binary data. If you're in ASCII hex mode, it's the CRC of what's represented by the ASCII hex characters.)
+The server responds with a ZFILE frame:
+
+2A 18 43 04 00 00 00 00 DD 51 A2 33               *.C.....ÝQ¢3
+OK. This one makes sense. If I calculate the CRC32 of [04 00 00 00 00], I indeed get 0x33A251DD. But now we don't have ANY [CR] [LF] [XON] at the end. Why is this?
+
+Immediately after this frame, the server also sends the file's metadata:
+
+68 65 6C 6C 6F 77 6F 72 6C 64 2E 74 78 74 00 31   helloworld.txt.1
+33 20 32 34 30 20 31 30 30 36 34 34 20 30 20 31   3 240 100644 0 1
+20 31 33 00 18 6B 18 50 D3 0F F1 11                13..k.PÓ.ñ.
+This doesn't even have a header, it just jumps straight to the data. OK, I can live with that. However:
+
+We have our first mysterious ZCRCW frame: [18 6B]. How long is this frame? Where is the CRC data, and is it CRC16 or CRC32? It's not defined anywhere in the spec.
+The MSDN article specifies that the [18 6B] should be followed by [00], but it isn't.
+Then we have a frame with an undefined type: [18 50 D3 0F F1 11]. Is this a separate frame or is it part of ZCRCW?
+The client needs to respond with a ZRPOS frame, again taken from the MSDN article:
+
+2A 2A 18 42 30 39 30 30 30 30 30 30 30 30 61 38   **.B0900000000a8
+37 63 0D 8A                                       7c.Š
+Same issues as with the ZRINIT frame: the CRC is wrong, the [LF] has bit 0x80 set, and there's no [XON].
+
+The server responds with a ZDATA frame:
+
+2A 18 43 0A 00 00 00 00 BC EF 92 8C               *.C.....¼ï’Œ
+Same issues as ZFILE: the CRC is all fine, but where's the [CR] [LF] [XON]?
+
+After this, the server sends the file's payload. Since this is a short example, it fits in one block (max size is 1024):
+
+48 65 6C 6C 6F 20 77 6F 72 6C 64 21 0A            Hello world!.
+From what the article seems to mention, payloads are escaped with [ZDLE]. So how do I transmit a payload byte that happens to match the value of [ZDLE]? Are there any other values like this?
+
+The server ends with these frames:
+
+18 68 05 DE 02 18 D0                              .h.Þ..Ð
+2A 18 43 0B 0D 00 00 00 D1 1E 98 43               *.C.....Ñ.˜C
+I'm completely lost on the first one. The second makes as much sense as the ZRINIT and ZDATA frames.
+
+protocols zmodem
+share  improve this question  follow 
+edited Mar 14 '12 at 21:56
+
+mattdm
+1,4821717 silver badges3434 bronze badges
+asked Mar 7 '12 at 23:53
+
+Jeff E
+6,06322 gold badges1919 silver badges2929 bronze badges
+I am working on precisely the same thing for precisely the same reason; If you ever made this work, and have source code, that would be awesome... – David Given May 27 '13 at 10:45
+How did this end up? After spending a few days coding to get reliable zmodem receive working, I gave up and just shelled out to lrz. Worked in a day. It's nowhere near as clean but I didn't really feel like spending more time on a venerable but obsolete protocol... – bronson Nov 1 '16 at 22:50
+Also, beware! I found a few other zmodem code libraries out there but they were all totally unreliable! Probably 5% of the files I tried ended in failure, and I wasn't even trying to exploit the corner cases. Make sure you use battle-tested code, not someone's weekend project. – bronson Nov 1 '16 at 22:53
+add a comment
+2 Answers
+Active
+Oldest
+Votes
+
+6
+
+My buddy wonders if you are implementing a time machine.
+
+I don't know that I can answer all of your questions -- I've never actually had to implement zmodem myself -- but here are few answers:
+
+From what the article seems to mention, payloads are escaped with [ZDLE]. So how do I transmit a payload byte that happens to match the value of [ZDLE]? Are there any other values like this?
+
+This is explicitly addressed in the document you linked to at the beginning of your questions, which says:
+
+The ZDLE character is special.  ZDLE represents a control sequence
+of some sort.  If a ZDLE character appears in binary data, it is
+prefixed with ZDLE, then sent   as ZDLEE.
+It constantly refers to ZDLE-encoding, but what is it? When exactly do I use it, and when don't I use it?
+
+In the Old Days, certain "control characters" were used to control the communication channel (hence the name). For example, sending XON/XOFF characters might pause the transmission. ZDLE is used to escape characters that may be problematic. According to the spec, these are the characters that are escaped by default:
+
+ZMODEM software escapes ZDLE, 020, 0220, 021, 0221, 023, and 0223.
+If preceded by 0100 or 0300 (@), 015 and 0215 are also escaped to
+protect the Telenet command escape CR-@-CR.  The receiver ignores
+021, 0221, 023, and 0223 characters in the data stream.
+I've looked around for reference code, but all I can find are unreadable, undocumented C files from the early 90s.
+
+Does this include the code for the lrzsz package? This is still widely available on most Linux distributions (and surprisingly handy for transmitting files over an established ssh connection).
+
+There are a number of other implementations out there, including several in software listed on freecode, including qodem, syncterm, MBSE, and others. I believe the syncterm implementation is written as library that may be reasonable easy to use from your own code (but I'm not certain).
+
+You may find additional code if you poke around older collections of MS-DOS software.
+
+share  improve this answer  follow 
+answered Mar 14 '12 at 20:54
+
+larsks
+169k2929 gold badges271271 silver badges271271 bronze badges
+We're using some dev boards at work that run a custom Linux image, and the only way to communicate with them is through the UART (COM1) port. We frequently have to edit files on the build (using a wrapper program that I'm working on), so rather than compile a new image every time, we opted for lrzsz. The character-escaping is a bit clearer now, but I'm still wondering what the scope is. Thanks for the code links, it should help figure out these nuances. I'll mark this as the answer for now. – Jeff E Mar 14 '12 at 21:49
+add a comment
+
+1
+
+I can't blame you. The user manual is not organized in a user friendly way
+
+Are the padding bytes (0x2A) arbitrary?
+
+No, from page 14,15:
+
+A binary header begins with the sequence ZPAD, ZDLE, ZBIN.
+
+A hex header begins with the sequence ZPAD, ZPAD, ZDLE, ZHEX.
+
+.
+
+The spec doesn't mention the [CR] [LF] [XON] at the end, but the MSDN article does. Why is it there?
+
+Page 15
+
+* * ZDLE B TYPE F3/P0 F2/P1 F1/P2 F0/P3 CRC-1 CRC-2 CR LF XON . Why does the [LF] have bit 0x80 set?
+
+Not sure. From Tera term I got both control characters XORed with 0x80 (8D 8A 11)
+
+We have our first mysterious ZCRCW frame: [18 6B]. How long is this frame? Where is the CRC data, and is it CRC16 or CRC32? It's not defined anywhere in the spec.
+
+The ZCRCW is not a header or a frame type, it's more like a footer that tells the receiver what to expect next. In this case it's the footer of the data subpacket containing the file name. It's going to be a 32 bit checksum because you're using a "C" type binary header.
+
+ZDLE C TYPE F3/P0 F2/P1 F1/P2 F0/P3 CRC-1 CRC-2 CRC-3 CRC-4
+.
+
+Then we have a frame with an undefined type: [18 50 D3 0F F1 11]. Is this a separate frame or is it part of ZCRCW?
+
+That's the CRC for the ZCRCW data subpacket. It's 5 bytes because the first one is 0x10, a control character that needs to be ZDLE escaped. I'm not sure what 0x11 is.
+
+and there's no [XON].
+
+XON is just for Hex headers. You don't use it for a binary header.
+
+ZDLE A TYPE F3/P0 F2/P1 F1/P2 F0/P3 CRC-1 CRC-2 . So how do I transmit a payload byte that happens to match the value of [ZDLE]?
+18 58 (AKA ZDLEE)
+
+18 68 05 DE 02 18 D0
+
+That's the footer of the data subframe. The next 5 bytes are the CRC (last byte is ZDLE encoded)
+
+share  improve this answer  follow 
+edited Jun 20 at 9:12
+
+Community♦
+111 silver badge
+answered Mar 31 '15 at 17:59
+
+infinitenothing
+34122 silver badges44 bronze badges
+add a comment
+Your Answer
+Sign up or log in
+ Sign up using Google
+ Sign up using Facebook
+ Sign up using Email and Password
+Post as a guest
+Name
+Email
+Required, but never shown
+
+Post Your Answer
+By clicking “Post Your Answer”, you agree to our terms of service, privacy policy and cookie policy
+
+Not the answer you're looking for? Browse other questions tagged protocols zmodem or ask your own question.
+The Overflow Blog
+Podcast 264: Teaching yourself to code in prison
+The Overflow #36: Community-a-thon
+Featured on Meta
+New post formatting
+Hot Meta Posts: Allow for removal by moderators, and thoughts about future…
+
+Report this ad
+Looking for a job?
+
+Senior Front-end Developer
+CodilityNo office location
+€70K - €85KREMOTE
+javascriptreactjs
+
+Senior Python Engineer for Booking Backend Tribe
+Kiwi.comPrague, Czechia
+€33K - €49KRELOCATION
+pythondocker
+
+Test Engineer Automotive Linux
+SUSEPrague, Czechia
+REMOTE
+pythonlinux
+
+C++ Software Developer (m/f/d) for Linux based Audio Products
+Lautsprecher Teufel GmbHBerlin, Deutschland
+cc++
+
+REMOTE Staff Front-End Engineer | VC-backed | Fast Growing SaaS Company
+Process StreetNo office location
+$135K - $175KREMOTE
+javascriptreactjs
+
+Quality Assurance (QA) Software Tester (m/f/x)
+refurbedNo office location
+REMOTE
+htmlqa
+
+Full Stack Developer - Demand
+EverliVerona, Italy
+REMOTE
+phpmysql
+
+Full-Stack Python Engineer
+GorgiasNo office location
+€50K - €85KREMOTE
+pythonpostgres
+View more jobs on Stack Overflow
+43 people chatting
+Related
+89
+binary protocols v. text protocols
+0
+Understanding protocols
+131
+Simple explanation of clojure protocols
+306
+Get protocol, domain, and port from URL
+0
+Does JRE HttpServer violates the 'expect-continue' semantics of HTTP?
+0
+Zmodem receive file with C/C++
+Hot Network Questions
+Can a process background itself?
+Is there any benefit of using a swept wing at subsonic speeds?
+Is an invitation to 'chat' about a potential PhD position actually an interview? What am I to expect?
+Can non-deuterated solvents be used for 13C-NMR (and in fact other nuclei)?
+How to create a validation loop for multiple inputs
+How do economists explain why people contribute to Wikipedia?
+Looking for a Detailed Milky Way Map?
+Why do voltage regulator ICs have big ripple rejection ratio?
+pre-tenure faculty - should I ignore all possible troubles to get tenured?
+Can a species have different ancestors?
+Using a different algorithm depending on the size of the input
+Short research articles
+Is it unprofessional to accuse someone of being "snarky" in a work chat?
+Can I raise the listed rent on a rental property due to high demand?
+Can Warforged doff Cast-Off Armor in a single action?
+Why is this Blender matrix multiplication not distributive?
+Meaning of degeneracy in Quantum Mechanics
+Image rejected by Shutterstock because the main subject is out of focus and it contains noise
+Was Windows 95 really released in 1995?
+Headwind issues
+How does the ozone layer "stay in place"?
+With what liquid should I fill my dead, intraversable seas?
+Should I correct my daughter's pronunciation of ballet terms?
+Why would you use a shared-gate multi-channel MOSFET device?
+ Question feed
+
+STACK OVERFLOW
+Questions
+Jobs
+Developer Jobs Directory
+Salary Calculator
+Help
+Mobile
+Disable Responsiveness
+PRODUCTS
+Teams
+Talent
+Advertising
+Enterprise
+COMPANY
+About
+Press
+Work Here
+Legal
+Privacy Policy
+Contact Us
+STACK EXCHANGE
+NETWORK
+Technology
+Life / Arts
+Culture / Recreation
+Science
+Other
+Blog
+Facebook
+Twitter
+LinkedIn
+Instagram
+site design / logo © 2020 Stack Exchange Inc; user contributions licensed under cc by-sa. rev 2020.8.28.37509
+
+ 
